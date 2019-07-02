@@ -177,14 +177,13 @@ int main(void)
 
 
     /* config output */
-    uint64_t out_channel_layout=AV_CH_LAYOUT_STEREO;
-    int out_nb_samples=pCodecCtx->frame_size;   //nb_samples: AAC-1024 MP3-1152
-    AVSampleFormat out_sample_fmt=AV_SAMPLE_FMT_S16;
-    int out_sample_rate=44100;
-    int out_channels=av_get_channel_layout_nb_channels(out_channel_layout);
-    int out_buffer_size=av_samples_get_buffer_size(NULL,out_channels ,out_nb_samples,out_sample_fmt, 1);//Out Buffer Size
-    //printf("jy:out_nb_samples = %d, out_buffer_size = %d\n", out_nb_samples, out_buffer_size);
-    out_buffer=(uint8_t *)av_malloc(MAX_AUDIO_FRAME_SIZE*2);
+    uint64_t            out_channel_layout = AV_CH_LAYOUT_STEREO;
+    int                 out_nb_samples     = pCodecCtx->frame_size;   /* nb_samples: per frame size :AAC-1024 MP3-1152， frame_size not fixed */
+    AVSampleFormat      out_sample_fmt     = AV_SAMPLE_FMT_S16;       /* bitwide */
+    int                 out_sample_rate    = 44100;                   /* sample rate */
+    int                 out_channels       = av_get_channel_layout_nb_channels(out_channel_layout); /* channels */
+    int                 out_buffer_size    = av_samples_get_buffer_size(NULL, out_channels , out_nb_samples, out_sample_fmt, 1);//Out Buffer Size
+    out_buffer = (uint8_t *)av_malloc(MAX_AUDIO_FRAME_SIZE*2);
     pFrame=av_frame_alloc();
     if (NULL == pFrame)
     {
@@ -218,30 +217,30 @@ int main(void)
     //Swr
 
     au_convert_ctx = swr_alloc();
-    au_convert_ctx=swr_alloc_set_opts(au_convert_ctx,out_channel_layout, out_sample_fmt, out_sample_rate,
-    in_channel_layout,pCodecCtx->sample_fmt , pCodecCtx->sample_rate,0, NULL);
+    au_convert_ctx = swr_alloc_set_opts(au_convert_ctx, out_channel_layout, out_sample_fmt, out_sample_rate,
+                                        in_channel_layout, pCodecCtx->sample_fmt, pCodecCtx->sample_rate, 0, NULL);
     swr_init(au_convert_ctx);
- 
+
     //Play
     SDL_PauseAudio(0);
 
     int ret;
     int got_picture;
     Ff_Thread*  audioThread = new Ff_Thread;
-    /* creat audio thread */
+    /* creat keyboard thread */
     ret = pthread_create(&audioThread->threadId, NULL, &Ffmpeg_Keyboard_Quit, NULL);
     if (ret)
     {
         printf("Error:pthread_create failed!\n");
     }
-#if 1    
+#if 1 
     //add jiyi
     g_pPcmFile = fopen("./ffmpeg_pcm.pcm", "wb");
     if (!g_pPcmFile)
     {
-    printf("jy:open pcm file failed!\n");
+        printf("jy:open pcm file failed!\n");
     }
-#endif    
+#endif
     while(1)
     {
         if (true == g_bQuit)
@@ -251,42 +250,40 @@ int main(void)
         }   
         if (av_read_frame(pFormatCtx, packet)>=0)
         {
-        if(packet->stream_index==audioIndex)
-        {
-            ret = avcodec_decode_audio4( pCodecCtx, pFrame,&got_picture, packet);
-            if ( ret < 0 )
+            if(packet->stream_index==audioIndex)
             {
-                printf("Error in decoding audio frame.\n");
-                return -1;
-            }
-            if ( got_picture > 0 )
-            {
-                swr_convert(au_convert_ctx,&out_buffer, MAX_AUDIO_FRAME_SIZE,(const uint8_t **)pFrame->data , pFrame->nb_samples);
-#if 1
-                //printf("index:%5d\t pts:%lld\t packet size:%d\n",index,packet->pts,packet->size);
-#endif
-                //add jiyi
-                if (g_pPcmFile)
+                ret = avcodec_decode_audio4( pCodecCtx, pFrame,&got_picture, packet);
+                if ( ret < 0 )
                 {
-                    int ret = 0;
-                    ret = fwrite(out_buffer, 1, out_buffer_size, g_pPcmFile);
-                    //printf("jy:write pcm data %d bytes!", ret);
-                } 
-
-                index++;
-            }
+                    printf("Error in decoding audio frame.\n");
+                    return -1;
+                }
+                if ( got_picture > 0 )
+                {
+                    swr_convert(au_convert_ctx,&out_buffer, MAX_AUDIO_FRAME_SIZE,(const uint8_t **)pFrame->data , pFrame->nb_samples);
+#if 1
+                    //printf("index:%5d\t pts:%lld\t packet size:%d\n",index,packet->pts,packet->size);
+#endif
+                    //add jiyi
+                    if (g_pPcmFile)
+                    {
+                        int ret = 0;
+                        ret = fwrite(out_buffer, 1, out_buffer_size, g_pPcmFile);
+                    }
+                    index++;
+                }
 #if USE_SDL
-            while(audio_len>0)//Wait until finish
-            SDL_Delay(1); 
+                while(audio_len>0)//Wait until finish
+                SDL_Delay(1);
 
-            //Set audio buffer (PCM data)
-            audio_chunk = (Uint8 *) out_buffer; 
-            //Audio buffer length
-            audio_len =out_buffer_size;
-            audio_pos = audio_chunk;
+                //Set audio buffer (PCM data)
+                audio_chunk = (Uint8 *) out_buffer;
+                //Audio buffer length
+                audio_len =out_buffer_size;
+                audio_pos = audio_chunk;
 
 #endif
-            }
+                }
             av_free_packet(packet);
         }				
     }
