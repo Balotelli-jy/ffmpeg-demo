@@ -20,12 +20,14 @@ extern "C"
 };
 #endif
 
-#define USE_SDL 1
+#define DUMP_PCM                    /* dump解码完后的pcm数据 */
+#define USE_SDL  (1)                /* 使用使用SDL组件进行播放 */
 #define MAX_AUDIO_FRAME_SIZE 192000 /* 48khz mono/stereo 32/16bit */
 #define SAMPLE_GET_INPUTCMD(InputCmd) fgets((char *)(InputCmd), (sizeof(InputCmd) - 1), stdin) //TODO
 
-//add jiyi
+#ifdef DUMP_PCM
 static FILE* g_pPcmFile = NULL;
+#endif
 static bool  g_bQuit = false;
 
 
@@ -134,8 +136,8 @@ int main(void)
     AVPacket*           packet = NULL;
     AVFrame*            pFrame = NULL;
     uint8_t*            out_buffer;
-    SDL_AudioSpec wanted_spec;  //SDL组件
-    struct SwrContext *au_convert_ctx;
+    SDL_AudioSpec       wanted_spec;  /* SDL组件 */
+    struct SwrContext*  au_convert_ctx;
     int index = 0;
     int err = -1;
     int videoIndex = -1, audioIndex = -1;
@@ -183,11 +185,11 @@ int main(void)
     int                 out_sample_rate    = 44100;                   /* sample rate */
     int                 out_channels       = av_get_channel_layout_nb_channels(out_channel_layout); /* channels */
     int                 out_buffer_size    = av_samples_get_buffer_size(NULL, out_channels , out_nb_samples, out_sample_fmt, 1);//Out Buffer Size
-    out_buffer = (uint8_t *)av_malloc(MAX_AUDIO_FRAME_SIZE*2);
-    pFrame=av_frame_alloc();
+    out_buffer = (uint8_t *)av_malloc(MAX_AUDIO_FRAME_SIZE * 2);
+    pFrame = av_frame_alloc();
     if (NULL == pFrame)
     {
-        printf("Fatal:alloc pFrame failed!\n");
+        printf("Error:alloc pFrame failed!\n");
         return -1;
     }
 
@@ -198,13 +200,13 @@ int main(void)
             return -1;
         }
         //SDL_AudioSpec
-        wanted_spec.freq = out_sample_rate; 
-        wanted_spec.format = AUDIO_S16SYS; 
-        wanted_spec.channels = out_channels; 
-        wanted_spec.silence = 0; 
-        wanted_spec.samples = out_nb_samples; 
-        wanted_spec.callback = fill_audio; 
-        wanted_spec.userdata = pCodecCtx; 
+        wanted_spec.freq        = out_sample_rate; 
+        wanted_spec.format      = AUDIO_S16SYS; 
+        wanted_spec.channels    = out_channels; 
+        wanted_spec.silence     = 0; 
+        wanted_spec.samples     = out_nb_samples; 
+        wanted_spec.callback    = fill_audio; 
+        wanted_spec.userdata    = pCodecCtx; 
 
         if (SDL_OpenAudio(&wanted_spec, NULL)<0){ 
             printf("can't open audio.\n"); 
@@ -214,26 +216,28 @@ int main(void)
 
     //FIX:Some Codec's Context Information is missing
     int64_t in_channel_layout=av_get_default_channel_layout(pCodecCtx->channels);
-    //Swr
 
+    /* 重采样 */
     au_convert_ctx = swr_alloc();
     au_convert_ctx = swr_alloc_set_opts(au_convert_ctx, out_channel_layout, out_sample_fmt, out_sample_rate,
                                         in_channel_layout, pCodecCtx->sample_fmt, pCodecCtx->sample_rate, 0, NULL);
     swr_init(au_convert_ctx);
 
-    //Play
+    /* playback */
     SDL_PauseAudio(0);
 
+    /* creat keyboard thread */
     int ret;
     int got_picture;
     Ff_Thread*  audioThread = new Ff_Thread;
-    /* creat keyboard thread */
+
     ret = pthread_create(&audioThread->threadId, NULL, &Ffmpeg_Keyboard_Quit, NULL);
     if (ret)
     {
         printf("Error:pthread_create failed!\n");
     }
-#if 1 
+
+#ifdef DUMP_PCM
     //add jiyi
     g_pPcmFile = fopen("./ffmpeg_pcm.pcm", "wb");
     if (!g_pPcmFile)
@@ -241,6 +245,7 @@ int main(void)
         printf("jy:open pcm file failed!\n");
     }
 #endif
+
     while(1)
     {
         if (true == g_bQuit)
@@ -264,12 +269,14 @@ int main(void)
 #if 1
                     //printf("index:%5d\t pts:%lld\t packet size:%d\n",index,packet->pts,packet->size);
 #endif
-                    //add jiyi
+
+#ifdef DUMP_PCM
                     if (g_pPcmFile)
                     {
                         int ret = 0;
                         ret = fwrite(out_buffer, 1, out_buffer_size, g_pPcmFile);
                     }
+#endif
                     index++;
                 }
 #if USE_SDL
@@ -295,13 +302,13 @@ int main(void)
     SDL_CloseAudio();//Close SDL
     SDL_Quit();
 #endif
-    //add jiyi
+#ifdef DUMP_PCM
     if (g_pPcmFile)
     {
         fclose(g_pPcmFile);
         g_pPcmFile = NULL;
     }
-
+#endif
     av_free(out_buffer);
     avcodec_close(pCodecCtx);
     avformat_close_input(&pFormatCtx);	
