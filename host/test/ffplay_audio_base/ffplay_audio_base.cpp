@@ -20,25 +20,81 @@ extern "C"
 };
 #endif
 
+typedef struct Ffmpeg_Thread
+{
+    pthread_t threadId;
+} Ff_Thread;
+
+typedef struct Ffmpeg_CircleBuff
+{
+    uint8_t* buffer;
+    int      readPos;
+    int      writePos;
+    int      length;
+} CircleBuff;
+
+typedef struct Ffmpeg_PcmFrame
+{
+    //Buffer:
+    //|-----------|-------------|
+    //chunk-------pos---len-----|
+    Uint8*  audio_chunk;
+    Uint32  audio_len;
+    Uint8*  audio_pos;
+} PcmFrame;
+
 #define DUMP_PCM                    /* dump解码完后的pcm数据 */
 #define USE_SDL  (1)                /* 使用使用SDL组件进行播放 */
 #define MAX_AUDIO_FRAME_SIZE 192000 /* 48khz mono/stereo 32/16bit */
 #define SAMPLE_GET_INPUTCMD(InputCmd) fgets((char *)(InputCmd), (sizeof(InputCmd) - 1), stdin) //TODO
 
 #ifdef DUMP_PCM
-static FILE* g_pPcmFile = NULL;
+static FILE*        g_pPcmFile = NULL;
 #endif
-static bool  g_bQuit = false;
-
-
-typedef struct Ffmpeg_Thread
-{
-    pthread_t threadId;  
-} Ff_Thread;
+static bool         g_bQuit = false;
+static CircleBuff*  g_pLoopBuf = NULL;
+static PcmFrame*    g_pPcmFrame;
 
 //TODO:PATH
 static char* g_FilePath = "/home/jiyi/code/ffmpeg/host/bin/qinglvzhuang.mp3";
 
+int circleBuffQueryFree(CircleBuff* pCircleBuff)
+{
+    int freeLen, readPos, writePos;
+
+    readPos  = pCircleBuff->readPos;
+    writePos = pCircleBuff->writePos;
+
+    if (readPos > writePos)
+    {
+        freeLen = readPos - writePos;
+    }
+    else
+    {
+        freeLen = pCircleBuff->length - (writePos - readPos);
+    }
+
+    return freeLen;
+}
+
+int circleBuffQueryBusy(CircleBuff* pCircleBuff)
+{
+    int busyLen, readPos, writePos;
+
+    readPos  = pCircleBuff->readPos;
+    writePos = pCircleBuff->writePos;
+
+    if (readPos > writePos)
+    {
+        busyLen = pCircleBuff->length - (readPos - writePos);
+    }
+    else
+    {
+        busyLen = writePos - readPos;
+    }
+
+    return busyLen;
+}
 
 static int Ffmpeg_Init(AVFormatContext** pFormatCtx, int* videoIndex, int* audioIndex)
 {
@@ -101,16 +157,9 @@ static void* Ffmpeg_Keyboard_Quit(void *arg)
             g_bQuit = true;
             break;
         }
-
     }
-        
 }
-//Buffer:
-//|-----------|-------------|
-//chunk-------pos---len-----|
-static  Uint8  *audio_chunk; 
-static  Uint32  audio_len; 
-static  Uint8  *audio_pos; 
+
 /* The audio function callback takes the following parameters: 
  * stream: A pointer to the audio buffer to be filled 
  * len: The length (in bytes) of the audio buffer 
@@ -118,14 +167,15 @@ static  Uint8  *audio_pos;
 void  fill_audio(void *udata,Uint8 *stream,int len){ 
     //SDL 2.0
     SDL_memset(stream, 0, len);
-    if(audio_len==0)
-        return; 
- 
-    len=(len>audio_len?audio_len:len);  /*  Mix  as  much  data  as  possible  */ 
+    if(g_pPcmFrame->audio_len==0)
+        return;
 
-    SDL_MixAudio(stream,audio_pos,len,SDL_MIX_MAXVOLUME);
-    audio_pos += len;
-    audio_len -= len;
+    len=(len > g_pPcmFrame->audio_len ? g_pPcmFrame->audio_len : len);  /*  Mix  as  much  data  as  possible  */ 
+
+    SDL_MixAudio(stream, g_pPcmFrame->audio_pos, len, SDL_MIX_MAXVOLUME);
+    g_pPcmFrame->audio_pos += len;
+    g_pPcmFrame->audio_len -= len;
+    g_pLoopBuf->readPos += len;
 }
 
 int main(void)
@@ -135,13 +185,16 @@ int main(void)
     AVCodec*            pCodec= NULL;
     AVPacket*           packet = NULL;
     AVFrame*            pFrame = NULL;
-    uint8_t*            out_buffer;
     SDL_AudioSpec       wanted_spec;  /* SDL组件 */
     struct SwrContext*  au_convert_ctx;
+    uint8_t*            out_buffer;
+
     int index = 0;
     int err = -1;
     int videoIndex = -1, audioIndex = -1;
 
+    g_pLoopBuf  = (CircleBuff*)malloc(sizeof(CircleBuff));
+    g_pPcmFrame = (PcmFrame*)malloc(sizeof(PcmFrame));
     err = Ffmpeg_Init(&pFormatCtx, &videoIndex, &audioIndex);
     if(err)
     {
@@ -186,6 +239,13 @@ int main(void)
     int                 out_channels       = av_get_channel_layout_nb_channels(out_channel_layout); /* channels */
     int                 out_buffer_size    = av_samples_get_buffer_size(NULL, out_channels , out_nb_samples, out_sample_fmt, 1);//Out Buffer Size
     out_buffer = (uint8_t *)av_malloc(MAX_AUDIO_FRAME_SIZE * 2);
+    /* cieclebuffer init */
+    g_pLoopBuf->buffer   = (uint8_t *)av_malloc(MAX_AUDIO_FRAME_SIZE * 2);
+    g_pLoopBuf->length   = MAX_AUDIO_FRAME_SIZE * 2;
+    g_pLoopBuf->readPos  = 0;
+    g_pLoopBuf->writePos = 0;
+    memset(g_pLoopBuf->buffer, 0, g_pLoopBuf->length);
+
     pFrame = av_frame_alloc();
     if (NULL == pFrame)
     {
@@ -229,30 +289,38 @@ int main(void)
     /* creat keyboard thread */
     int ret;
     int got_picture;
-    Ff_Thread*  audioThread = new Ff_Thread;
+    Ff_Thread* keyboardThread = (Ff_Thread*)malloc(sizeof(Ff_Thread));
+    Ff_Thread* audioPlaybackThread = (Ff_Thread*)malloc(sizeof(Ff_Thread));
 
-    ret = pthread_create(&audioThread->threadId, NULL, &Ffmpeg_Keyboard_Quit, NULL);
+    ret = pthread_create(&keyboardThread->threadId, NULL, &Ffmpeg_Keyboard_Quit, NULL);
     if (ret)
     {
-        printf("Error:pthread_create failed!\n");
+        printf("Error:pthread_create keyboard failed!\n");
+        return -1;
     }
 
 #ifdef DUMP_PCM
-    //add jiyi
     g_pPcmFile = fopen("./ffmpeg_pcm.pcm", "wb");
     if (!g_pPcmFile)
     {
-        printf("jy:open pcm file failed!\n");
+        printf("Error:open pcm file failed!\n");
     }
 #endif
 
     while(1)
     {
+        /* go to quit by user input */
         if (true == g_bQuit)
         {
             g_bQuit = false;
             break;
-        }   
+        }
+        /* judge buffer for pcm */
+        if (out_buffer_size > circleBuffQueryFree(g_pLoopBuf))
+        {
+            usleep(5);
+            continue;
+        }
         if (av_read_frame(pFormatCtx, packet)>=0)
         {
             if(packet->stream_index==audioIndex)
@@ -266,10 +334,9 @@ int main(void)
                 if ( got_picture > 0 )
                 {
                     swr_convert(au_convert_ctx,&out_buffer, MAX_AUDIO_FRAME_SIZE,(const uint8_t **)pFrame->data , pFrame->nb_samples);
-#if 1
-                    //printf("index:%5d\t pts:%lld\t packet size:%d\n",index,packet->pts,packet->size);
-#endif
 
+                    memcpy(g_pLoopBuf->buffer, out_buffer, out_buffer_size);
+                    g_pLoopBuf->writePos += out_buffer_size;
 #ifdef DUMP_PCM
                     if (g_pPcmFile)
                     {
@@ -280,17 +347,14 @@ int main(void)
                     index++;
                 }
 #if USE_SDL
-                while(audio_len>0)//Wait until finish
+                /* Set SDL audio pcm buffer */
+                g_pPcmFrame->audio_chunk = (Uint8 *)g_pLoopBuf->buffer;
+                g_pPcmFrame->audio_len = circleBuffQueryBusy(g_pLoopBuf);
+                g_pPcmFrame->audio_pos = (Uint8 *)g_pLoopBuf->buffer;
+                while(g_pPcmFrame->audio_len>0)//Wait until finish
                 SDL_Delay(1);
-
-                //Set audio buffer (PCM data)
-                audio_chunk = (Uint8 *) out_buffer;
-                //Audio buffer length
-                audio_len =out_buffer_size;
-                audio_pos = audio_chunk;
-
 #endif
-                }
+            }
             av_free_packet(packet);
         }				
     }
@@ -310,7 +374,9 @@ int main(void)
     }
 #endif
     av_free(out_buffer);
+    av_free(g_pLoopBuf->buffer);
     avcodec_close(pCodecCtx);
     avformat_close_input(&pFormatCtx);	
     return 0;
 }
+
